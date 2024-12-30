@@ -2,6 +2,9 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::convert::Into;
+use core::marker::PhantomData;
+use core::option::Option;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::{ax_err, ax_err_type, AxResult};
@@ -15,16 +18,23 @@ use crate::config::{AxVMConfig, VmMemMappingType};
 use crate::vcpu::{AxArchVCpuImpl, AxVCpuCreateConfig};
 use crate::{has_hardware_support, AxVMHal};
 
+#[cfg(feature = "gdb")]
+use crate::config::GdbConnection;
+#[cfg(feature = "gdb")]
+use crate::gdb::GdbTarget;
+#[cfg(feature = "gdb")]
+use gdbstub::stub::state_machine::GdbStubStateMachine;
+
 const VM_ASPACE_BASE: usize = 0x0;
 const VM_ASPACE_SIZE: usize = 0x7fff_ffff_f000;
 
-/// A vCPU with architecture-independent interface.
+/// Type alias for a vCPU with architecture-independent interface.
 #[allow(type_alias_bounds)]
 type VCpu<U: AxVCpuHal> = AxVCpu<AxArchVCpuImpl<U>>;
-/// A reference to a vCPU.
+/// Type alias for a reference to a vCPU.
 #[allow(type_alias_bounds)]
 pub type AxVCpuRef<U: AxVCpuHal> = Arc<VCpu<U>>;
-/// A reference to a VM.
+/// Type alias for a reference to a VM.
 #[allow(type_alias_bounds)]
 pub type AxVMRef<H: AxVMHal, U: AxVCpuHal> = Arc<AxVM<H, U>>; // we know the bound is not enforced here, we keep it for clarity
 
@@ -38,17 +48,38 @@ struct AxVMInnerConst<U: AxVCpuHal> {
 unsafe impl<U: AxVCpuHal> Send for AxVMInnerConst<U> {}
 unsafe impl<U: AxVCpuHal> Sync for AxVMInnerConst<U> {}
 
-struct AxVMInnerMut<H: AxVMHal> {
+pub(crate) struct AxVMInnerMut<H: AxVMHal, U: AxVCpuHal> {
     // Todo: use more efficient lock.
     address_space: Mutex<AddrSpace<H::PagingHandler>>,
-    _marker: core::marker::PhantomData<H>,
+    #[cfg(feature = "gdb")]
+    pub(crate) gdb_target: Mutex<Option<GdbTarget<H, U>>>,
+    #[cfg(feature = "gdb")]
+    pub(crate) gdb_state:
+        Mutex<Option<GdbStubStateMachine<'static, GdbTarget<H, U>, GdbConnection>>>,
+    _marker: core::marker::PhantomData<(H, U)>,
 }
+
+impl<H: AxVMHal, U: AxVCpuHal> AxVMInnerMut<H, U> {
+    fn new(address_space: AddrSpace<H::PagingHandler>) -> Self {
+        Self {
+            address_space: Mutex::new(address_space),
+            #[cfg(feature = "gdb")]
+            gdb_target: Mutex::new(None),
+            #[cfg(feature = "gdb")]
+            gdb_state: Mutex::new(None),
+            _marker: PhantomData,
+        }
+    }
+}
+
+unsafe impl<H: AxVMHal, U: AxVCpuHal> Send for AxVMInnerMut<H, U> {}
+unsafe impl<H: AxVMHal, U: AxVCpuHal> Sync for AxVMInnerMut<H, U> {}
 
 /// A Virtual Machine.
 pub struct AxVM<H: AxVMHal, U: AxVCpuHal> {
     running: AtomicBool,
     inner_const: AxVMInnerConst<U>,
-    inner_mut: AxVMInnerMut<H>,
+    pub(crate) inner_mut: AxVMInnerMut<H, U>,
 }
 
 impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
@@ -179,10 +210,7 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
                     vcpu_list: vcpu_list.into_boxed_slice(),
                     devices,
                 },
-                inner_mut: AxVMInnerMut {
-                    address_space: Mutex::new(address_space),
-                    _marker: core::marker::PhantomData,
-                },
+                inner_mut: AxVMInnerMut::new(address_space),
             }
         });
 

@@ -12,6 +12,8 @@ extern crate alloc;
 #[macro_use]
 extern crate log;
 
+#[cfg(feature = "gdb")]
+mod gdb;
 mod hal;
 mod vcpu;
 mod vm;

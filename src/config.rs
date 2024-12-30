@@ -6,12 +6,19 @@ use alloc::vec::Vec;
 
 use axaddrspace::GuestPhysAddr;
 
+#[cfg(feature = "gdb")]
+use alloc::boxed::Box;
+#[cfg(feature = "gdb")]
+use gdbstub::conn::ConnectionExt;
+#[cfg(feature = "gdb")]
+pub type GdbConnection = Box<dyn ConnectionExt<Error = axerrno::AxError>>;
+
 pub use axvmconfig::{
     AxVMCrateConfig, EmulatedDeviceConfig, PassThroughDeviceConfig, VMType, VmMemConfig,
     VmMemMappingType,
 };
 
-/// A part of `AxVCpuConfig`, which represents an architecture-dependent `VCpu`.
+/// A part of `AxVMConfig`, which represents an architecture-dependent `VCpu`.
 ///
 /// The concrete type of configuration is defined in `AxArchVCpuImpl`.
 // #[derive(Clone, Copy, Debug, Default)]
@@ -21,7 +28,7 @@ pub use axvmconfig::{
 // }
 
 /// A part of `AxVMConfig`, which represents a `VCpu`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AxVCpuConfig {
     // pub arch_config: AxArchVCpuConfig,
     /// The entry address in GPA for the Bootstrap Processor (BSP).
@@ -31,7 +38,7 @@ pub struct AxVCpuConfig {
 }
 
 /// A part of `AxVMConfig`, which stores configuration attributes related to the load address of VM images.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct VMImageConfig {
     /// The load address in GPA for the kernel image.
     pub kernel_load_gpa: GuestPhysAddr,
@@ -44,7 +51,7 @@ pub struct VMImageConfig {
 }
 
 /// A part of `AxVMCrateConfig`, which represents a `VM`.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct AxVMConfig {
     id: usize,
     name: String,
@@ -58,6 +65,8 @@ pub struct AxVMConfig {
     memory_regions: Vec<VmMemConfig>,
     emu_devices: Vec<EmulatedDeviceConfig>,
     pass_through_devices: Vec<PassThroughDeviceConfig>,
+    #[cfg(feature = "gdb")]
+    pub gdb_port: Option<u16>,
 }
 
 impl From<AxVMCrateConfig> for AxVMConfig {
@@ -82,6 +91,8 @@ impl From<AxVMCrateConfig> for AxVMConfig {
             memory_regions: cfg.memory_regions,
             emu_devices: cfg.emu_devices,
             pass_through_devices: cfg.passthrough_devices,
+            #[cfg(feature = "gdb")]
+            gdb_port: cfg.gdb_port,
         }
     }
 }

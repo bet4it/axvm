@@ -4,7 +4,7 @@ use axvcpu::AxVCpuHal;
 use gdbstub::{
     common::Signal,
     stub::{state_machine::GdbStubStateMachine, GdbStub},
-    target::{Target, TargetResult},
+    target::{Target, TargetResult, TargetError},
 };
 
 use crate::{gdb::arch::ArchTarget, AxVM, AxVMHal, AxVMRef};
@@ -62,8 +62,12 @@ impl<H: AxVMHal, U: AxVCpuHal> gdbstub::target::ext::base::singlethread::SingleT
         start_addr: <Self::Arch as gdbstub::arch::Arch>::Usize,
         data: &mut [u8],
     ) -> TargetResult<usize, Self> {
-        // let bytes_read = self.vm.read_memory(start_addr, data)?;
-        Ok(0)
+        if let Some(bytes) = self.vm.read_guest_memory(start_addr as usize, data.len()) {
+            data.copy_from_slice(&bytes);
+            Ok(data.len())
+        } else {
+            Err(TargetError::Errno(1))
+        }
     }
 
     fn write_addrs(
@@ -71,8 +75,11 @@ impl<H: AxVMHal, U: AxVCpuHal> gdbstub::target::ext::base::singlethread::SingleT
         start_addr: <Self::Arch as gdbstub::arch::Arch>::Usize,
         data: &[u8],
     ) -> TargetResult<(), Self> {
-        // self.vm.write_memory(start_addr, data)?;
-        Ok(())
+        if let Some(()) = self.vm.write_guest_memory(start_addr as usize, data) {
+            Ok(())
+        } else {
+            Err(TargetError::Errno(1))
+        }
     }
 
     fn support_resume(
@@ -104,7 +111,6 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
     }
 
     pub fn gdbserver_loop(self: &Arc<Self>) {
-        info!("GDB server loop");
         let gdbstub = self.inner_mut.gdb_state.lock().take();
 
         if let Some(mut gdb) = gdbstub {
@@ -127,7 +133,6 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
                         }
                     }
                     GdbStubStateMachine::Running(_) => {
-                        info!("GDB server: entering running state");
                         break;
                     }
                     GdbStubStateMachine::CtrlCInterrupt(_) => {
@@ -148,22 +153,24 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
     }
 
     pub fn gdbserver_report(self: &Arc<Self>) {
-        info!("GDB server report");
-        let gdbstub = self.inner_mut.gdb_state.lock().take();
-        if let Some(gdb) = gdbstub {
-            let mut target = self.inner_mut.gdb_target.lock().take().unwrap();
-            let new_state = if let GdbStubStateMachine::Running(gdb_inner) = gdb {
-                match gdb_inner
-                    .report_stop(&mut target, gdbstub::stub::SingleThreadStopReason::DoneStep)
-                {
-                    Ok(gdb_state) => Some(gdb_state),
-                    Err(_) => None,
+        let gdb = self.inner_mut.gdb_state.lock().take();
+        let target = self.inner_mut.gdb_target.lock().take();
+
+        if let (Some(gdb_inner), Some(mut target_inner)) = (gdb, target) {
+            let gdb = if let GdbStubStateMachine::Running(gdb_running) = gdb_inner {
+                match gdb_running.report_stop(&mut target_inner, gdbstub::stub::SingleThreadStopReason::DoneStep) {
+                    Ok(gdb) => Some(gdb),
+                    Err(e) => {
+                        warn!("Report stop error: {:?}", e);
+                        return;
+                    }
                 }
             } else {
-                Some(gdb)
+                Some(gdb_inner)
             };
-            *self.inner_mut.gdb_target.lock() = Some(target);
-            *self.inner_mut.gdb_state.lock() = new_state;
+            *self.inner_mut.gdb_state.lock() = gdb;
+            *self.inner_mut.gdb_target.lock() = Some(target_inner);
+            self.gdbserver_loop();
         }
     }
 }

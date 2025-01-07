@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use alloc::format;
+use alloc::{format, vec};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::convert::Into;
@@ -363,5 +363,42 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
 
         vcpu.unbind()?;
         Ok(exit_reason)
+    }
+
+    /// Read bytes from guest physical memory.
+    ///
+    /// # Arguments
+    /// * `gpa` - Guest physical address to read from
+    /// * `size` - Number of bytes to read
+    ///
+    /// # Returns
+    /// * `Option<Vec<u8>>` - The read bytes if successful, None if the address is invalid
+    pub fn read_guest_memory(&self, gpa: usize, size: usize) -> Option<Vec<u8>> {
+        let addr_space = self.inner_mut.address_space.lock();
+        let buffer = addr_space
+            .translated_byte_buffer(GuestPhysAddr::from_usize(gpa), size)?;
+        let mut data = vec![0; size];
+        for (i, slice) in buffer.iter().enumerate() {
+            data[i..i + slice.len()].copy_from_slice(slice);
+        }
+        Some(data)
+    }
+
+    /// Write bytes to guest physical memory.
+    ///
+    /// # Arguments
+    /// * `gpa` - Guest physical address to write to
+    /// * `data` - Bytes to write
+    ///
+    /// # Returns
+    /// * `Option<()>` - Some(()) if successful, None if the address is invalid
+    pub fn write_guest_memory(&self, gpa: usize, data: &[u8]) -> Option<()> {
+        let addr_space = self.inner_mut.address_space.lock();
+        let mut buffer = addr_space
+            .translated_byte_buffer(GuestPhysAddr::from_usize(gpa), data.len())?;
+        for (i, slice) in buffer.iter_mut().enumerate() {
+            slice.copy_from_slice(&data[i..i + slice.len()]);
+        }
+        Some(())
     }
 }

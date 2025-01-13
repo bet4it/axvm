@@ -7,7 +7,7 @@ use core::marker::PhantomData;
 use core::option::Option;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use axerrno::{ax_err, ax_err_type, AxResult};
+use axerrno::{AxResult, ax_err, ax_err_type};
 use spin::Mutex;
 
 use axaddrspace::{AddrSpace, GuestPhysAddr, HostPhysAddr, MappingFlags};
@@ -16,7 +16,7 @@ use axvcpu::{AxArchVCpu, AxVCpu, AxVCpuExitReason, AxVCpuHal};
 
 use crate::config::{AxVMConfig, VmMemMappingType};
 use crate::vcpu::{AxArchVCpuImpl, AxVCpuCreateConfig};
-use crate::{has_hardware_support, AxVMHal};
+use crate::{AxVMHal, has_hardware_support};
 
 #[cfg(feature = "gdb")]
 use crate::config::GdbConnection;
@@ -135,7 +135,9 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
 
                 // Check mapping flags.
                 if mapping_flags.contains(MappingFlags::DEVICE) {
-                    warn!("Do not include DEVICE flag in memory region flags, it should be configured in pass_through_devices");
+                    warn!(
+                        "Do not include DEVICE flag in memory region flags, it should be configured in pass_through_devices"
+                    );
                     continue;
                 }
 

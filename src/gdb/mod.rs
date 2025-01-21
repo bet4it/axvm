@@ -3,11 +3,11 @@ use axerrno::AxError;
 use axvcpu::AxVCpuHal;
 use gdbstub::{
     common::Signal,
-    stub::{state_machine::GdbStubStateMachine, GdbStub},
-    target::{Target, TargetResult, TargetError},
+    stub::{GdbStub, state_machine::GdbStubStateMachine},
+    target::{Target, TargetError, TargetResult},
 };
 
-use crate::{gdb::arch::ArchTarget, AxVM, AxVMHal, AxVMRef};
+use crate::{AxVM, AxVMHal, AxVMRef, gdb::arch::ArchTarget};
 
 mod arch;
 
@@ -62,12 +62,26 @@ impl<H: AxVMHal, U: AxVCpuHal> gdbstub::target::ext::base::singlethread::SingleT
         start_addr: <Self::Arch as gdbstub::arch::Arch>::Usize,
         data: &mut [u8],
     ) -> TargetResult<usize, Self> {
-        if let Some(bytes) = self.vm.read_guest_memory(start_addr as usize, data.len()) {
-            data.copy_from_slice(&bytes);
-            Ok(data.len())
-        } else {
-            Err(TargetError::Errno(1))
+        if let Some(vcpu) = self.vm.vcpu(0) {
+            let (mut addr, buf, mut count) = (start_addr as usize, data.as_mut_ptr(), data.len());
+            let page_table = vcpu.get_page_table_root();
+            if page_table != 0.into() {
+                let (paddr, _, size) = self
+                    .vm
+                    .get_page(page_table, start_addr)
+                    .map_err(|_| TargetError::Errno(1))?;
+                addr = paddr.as_usize();
+                count = count.min(size as usize);
+            }
+            // Return error when unwrap is failed.
+            let res = self
+                .vm
+                .read_guest_memory(addr, count)
+                .ok_or(TargetError::Errno(1))?;
+            data.copy_from_slice(&res);
+            return Ok(res.len());
         }
+        Err(TargetError::Errno(1))
     }
 
     fn write_addrs(
@@ -75,11 +89,24 @@ impl<H: AxVMHal, U: AxVCpuHal> gdbstub::target::ext::base::singlethread::SingleT
         start_addr: <Self::Arch as gdbstub::arch::Arch>::Usize,
         data: &[u8],
     ) -> TargetResult<(), Self> {
-        if let Some(()) = self.vm.write_guest_memory(start_addr as usize, data) {
-            Ok(())
-        } else {
-            Err(TargetError::Errno(1))
+        if let Some(vcpu) = self.vm.vcpu(0) {
+            let (mut addr, mut count) = (start_addr as usize, data.len());
+            let page_table = vcpu.get_page_table_root();
+            if page_table != 0.into() {
+                let (paddr, _, size) = self
+                    .vm
+                    .get_page(page_table, start_addr)
+                    .map_err(|_| TargetError::Errno(1))?;
+                addr = paddr.as_usize();
+                count = count.min(size as usize);
+            }
+            // Write the data to guest memory
+            self.vm
+                .write_guest_memory(addr, &data[..count])
+                .ok_or(TargetError::Errno(1))?;
+            return Ok(());
         }
+        Err(TargetError::Errno(1))
     }
 
     fn support_resume(
@@ -133,6 +160,7 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
                         }
                     }
                     GdbStubStateMachine::Running(_) => {
+                        info!("GDB server: Running");
                         break;
                     }
                     GdbStubStateMachine::CtrlCInterrupt(_) => {
@@ -158,7 +186,10 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
 
         if let (Some(gdb_inner), Some(mut target_inner)) = (gdb, target) {
             let gdb = if let GdbStubStateMachine::Running(gdb_running) = gdb_inner {
-                match gdb_running.report_stop(&mut target_inner, gdbstub::stub::SingleThreadStopReason::DoneStep) {
+                match gdb_running.report_stop(
+                    &mut target_inner,
+                    gdbstub::stub::SingleThreadStopReason::DoneStep,
+                ) {
                     Ok(gdb) => Some(gdb),
                     Err(e) => {
                         warn!("Report stop error: {:?}", e);

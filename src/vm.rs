@@ -1,11 +1,13 @@
 use alloc::boxed::Box;
-use alloc::{format, vec};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 use core::convert::Into;
 use core::marker::PhantomData;
 use core::option::Option;
 use core::sync::atomic::{AtomicBool, Ordering};
+use memory_addr::{PhysAddr, VirtAddr};
+use page_table_multiarch::{PageSize, PagingHandler, PagingResult};
 
 use axerrno::{AxResult, ax_err, ax_err_type};
 use spin::Mutex;
@@ -37,6 +39,38 @@ pub type AxVCpuRef<U: AxVCpuHal> = Arc<VCpu<U>>;
 /// Type alias for a reference to a VM.
 #[allow(type_alias_bounds)]
 pub type AxVMRef<H: AxVMHal, U: AxVCpuHal> = Arc<AxVM<H, U>>; // we know the bound is not enforced here, we keep it for clarity
+
+use axaddrspace::npt::NestedPageTable as PageTable;
+
+pub struct PagingHandlerEpt<F>(Option<F>);
+
+impl<F> PagingHandlerEpt<F>
+where
+    F: Fn(PhysAddr) -> VirtAddr,
+{
+    pub fn set_callback(&mut self, closure: F) {
+        self.0 = Some(closure)
+    }
+}
+
+impl<F> PagingHandler for PagingHandlerEpt<F>
+where
+    F: Fn(PhysAddr) -> VirtAddr,
+{
+    fn new() -> Self {
+        Self(None)
+    }
+    fn alloc_frame(&self) -> Option<PhysAddr> {
+        None
+    }
+
+    fn dealloc_frame(&self, _: PhysAddr) {}
+
+    #[inline]
+    fn phys_to_virt(&self, paddr: PhysAddr) -> VirtAddr {
+        self.0.as_ref().map(|f| f(paddr)).unwrap()
+    }
+}
 
 struct AxVMInnerConst<U: AxVCpuHal> {
     id: usize,
@@ -377,8 +411,7 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
     /// * `Option<Vec<u8>>` - The read bytes if successful, None if the address is invalid
     pub fn read_guest_memory(&self, gpa: usize, size: usize) -> Option<Vec<u8>> {
         let addr_space = self.inner_mut.address_space.lock();
-        let buffer = addr_space
-            .translated_byte_buffer(GuestPhysAddr::from_usize(gpa), size)?;
+        let buffer = addr_space.translated_byte_buffer(GuestPhysAddr::from_usize(gpa), size)?;
         let mut data = vec![0; size];
         for (i, slice) in buffer.iter().enumerate() {
             data[i..i + slice.len()].copy_from_slice(slice);
@@ -396,11 +429,33 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
     /// * `Option<()>` - Some(()) if successful, None if the address is invalid
     pub fn write_guest_memory(&self, gpa: usize, data: &[u8]) -> Option<()> {
         let addr_space = self.inner_mut.address_space.lock();
-        let mut buffer = addr_space
-            .translated_byte_buffer(GuestPhysAddr::from_usize(gpa), data.len())?;
+        let mut buffer =
+            addr_space.translated_byte_buffer(GuestPhysAddr::from_usize(gpa), data.len())?;
         for (i, slice) in buffer.iter_mut().enumerate() {
             slice.copy_from_slice(&data[i..i + slice.len()]);
         }
         Some(())
+    }
+
+    pub fn get_page(
+        &self,
+        page_table: GuestPhysAddr,
+        addr: u64,
+    ) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
+        let addr_space = self.inner_mut.address_space.lock();
+        let vcpu = self.vcpu(0).unwrap();
+        // Handle Result from get_ept_root() using unwrap_or_else
+        let root_paddr = page_table.as_usize();
+        let mut paging = PagingHandlerEpt::new();
+        paging.set_callback(|guest_addr| {
+            // Convert PhysAddr to GuestPhysAddr then translate
+            let gpa = GuestPhysAddr::from(guest_addr.as_usize());
+            info!("CB: Try to translate GPA {:#x}", gpa);
+            let host_addr = addr_space.translate(gpa).unwrap();
+            info!("CB: Translated from GPA {:#x} to HPA {:#x}", gpa, host_addr);
+            // Convert HostPhysAddr to VirtAddr through HAL
+            H::phys_to_virt(host_addr)
+        });
+        PageTable::create_from(root_paddr.into(), paging).query((addr as usize).into())
     }
 }

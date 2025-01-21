@@ -13,6 +13,9 @@ pub trait AxVMHal: Sized {
     /// Deallocates a memory region at the specified physical address.
     fn dealloc_memory_region_at(base: HostPhysAddr, size: usize);
 
+    /// Converts a physical address to the corresponding virtual address.
+    fn phys_to_virt(paddr: HostPhysAddr) -> HostVirtAddr;
+
     /// Converts a virtual address to the corresponding physical address.
     fn virt_to_phys(vaddr: HostVirtAddr) -> HostPhysAddr;
 

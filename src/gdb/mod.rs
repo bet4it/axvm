@@ -62,26 +62,11 @@ impl<H: AxVMHal, U: AxVCpuHal> gdbstub::target::ext::base::singlethread::SingleT
         start_addr: <Self::Arch as gdbstub::arch::Arch>::Usize,
         data: &mut [u8],
     ) -> TargetResult<usize, Self> {
-        if let Some(vcpu) = self.vm.vcpu(0) {
-            let (mut addr, buf, mut count) = (start_addr as usize, data.as_mut_ptr(), data.len());
-            let page_table = vcpu.get_page_table_root();
-            if page_table != 0.into() {
-                let (paddr, _, size) = self
-                    .vm
-                    .get_page(page_table, start_addr)
-                    .map_err(|_| TargetError::Errno(1))?;
-                addr = paddr.as_usize();
-                count = count.min(size as usize);
-            }
-            // Return error when unwrap is failed.
-            let res = self
-                .vm
-                .read_guest_memory(addr, count)
-                .ok_or(TargetError::Errno(1))?;
-            data.copy_from_slice(&res);
-            return Ok(res.len());
-        }
-        Err(TargetError::Errno(1))
+        let res = self.vm
+            .read_guest_virtual_memory(0, start_addr as usize, data.len())
+            .ok_or(TargetError::Errno(1))?;
+        data.copy_from_slice(&res);
+        Ok(res.len())
     }
 
     fn write_addrs(
@@ -89,24 +74,10 @@ impl<H: AxVMHal, U: AxVCpuHal> gdbstub::target::ext::base::singlethread::SingleT
         start_addr: <Self::Arch as gdbstub::arch::Arch>::Usize,
         data: &[u8],
     ) -> TargetResult<(), Self> {
-        if let Some(vcpu) = self.vm.vcpu(0) {
-            let (mut addr, mut count) = (start_addr as usize, data.len());
-            let page_table = vcpu.get_page_table_root();
-            if page_table != 0.into() {
-                let (paddr, _, size) = self
-                    .vm
-                    .get_page(page_table, start_addr)
-                    .map_err(|_| TargetError::Errno(1))?;
-                addr = paddr.as_usize();
-                count = count.min(size as usize);
-            }
-            // Write the data to guest memory
-            self.vm
-                .write_guest_memory(addr, &data[..count])
-                .ok_or(TargetError::Errno(1))?;
-            return Ok(());
-        }
-        Err(TargetError::Errno(1))
+        self.vm
+            .write_guest_virtual_memory(0, start_addr as usize, data)
+            .ok_or(TargetError::Errno(1))
+
     }
 
     fn support_resume(
@@ -120,6 +91,21 @@ impl<H: AxVMHal, U: AxVCpuHal> gdbstub::target::ext::base::singlethread::SingleT
     for GdbTarget<H, U>
 {
     fn resume(&mut self, _signal: Option<Signal>) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn support_single_step(&mut self) -> Option<gdbstub::target::ext::base::singlethread::SingleThreadSingleStepOps<Self>> {
+        Some(self)
+    }
+}
+
+impl<H: AxVMHal, U: AxVCpuHal> gdbstub::target::ext::base::singlethread::SingleThreadSingleStep for GdbTarget<H, U> {
+    fn step(&mut self, signal: Option<Signal>) -> Result<(), Self::Error> {
+        if signal.is_some() {
+            return Err(AxError::BadAddress);
+        }
+        self.target.step(&mut self.vm);
         Ok(())
     }
 }
@@ -160,7 +146,7 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
                         }
                     }
                     GdbStubStateMachine::Running(_) => {
-                        info!("GDB server: Running");
+                        // info!("GDB server: Running");
                         break;
                     }
                     GdbStubStateMachine::CtrlCInterrupt(_) => {
@@ -184,6 +170,10 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
         let gdb = self.inner_mut.gdb_state.lock().take();
         let target = self.inner_mut.gdb_target.lock().take();
 
+        if let Some((addr, saved_inst, saved_len)) = self.inner_mut.saved_inst.lock().take() {
+            self.write_guest_virtual_memory(0, addr as usize, &saved_inst[..saved_len])
+                .expect("Failed to restore instruction");
+        }
         if let (Some(gdb_inner), Some(mut target_inner)) = (gdb, target) {
             let gdb = if let GdbStubStateMachine::Running(gdb_running) = gdb_inner {
                 match gdb_running.report_stop(

@@ -34,4 +34,9 @@ pub trait ArchTarget {
         vm: &mut AxVMRef<H, U>,
         regs: &<Arch as gdbstub::arch::Arch>::Registers,
     );
+    #[cfg(target_arch = "riscv64")]
+    fn step<H: AxVMHal, U: AxVCpuHal>(
+        &self,
+        vm: &mut AxVMRef<H, U>,
+    );
 }

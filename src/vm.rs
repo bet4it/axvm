@@ -90,6 +90,8 @@ pub(crate) struct AxVMInnerMut<H: AxVMHal, U: AxVCpuHal> {
     #[cfg(feature = "gdb")]
     pub(crate) gdb_state:
         Mutex<Option<GdbStubStateMachine<'static, GdbTarget<H, U>, GdbConnection>>>,
+    #[cfg(feature = "gdb")]
+    pub(crate) saved_inst: Mutex<Option<(u64, [u8; 4], usize)>>,
     _marker: core::marker::PhantomData<(H, U)>,
 }
 
@@ -101,6 +103,8 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVMInnerMut<H, U> {
             gdb_target: Mutex::new(None),
             #[cfg(feature = "gdb")]
             gdb_state: Mutex::new(None),
+            #[cfg(feature = "gdb")]
+            saved_inst: Mutex::new(None),
             _marker: PhantomData,
         }
     }
@@ -443,19 +447,67 @@ impl<H: AxVMHal, U: AxVCpuHal> AxVM<H, U> {
         addr: u64,
     ) -> PagingResult<(PhysAddr, MappingFlags, PageSize)> {
         let addr_space = self.inner_mut.address_space.lock();
-        let vcpu = self.vcpu(0).unwrap();
+        let _vcpu = self.vcpu(0).unwrap();
         // Handle Result from get_ept_root() using unwrap_or_else
         let root_paddr = page_table.as_usize();
         let mut paging = PagingHandlerEpt::new();
         paging.set_callback(|guest_addr| {
             // Convert PhysAddr to GuestPhysAddr then translate
             let gpa = GuestPhysAddr::from(guest_addr.as_usize());
-            info!("CB: Try to translate GPA {:#x}", gpa);
             let host_addr = addr_space.translate(gpa).unwrap();
-            info!("CB: Translated from GPA {:#x} to HPA {:#x}", gpa, host_addr);
             // Convert HostPhysAddr to VirtAddr through HAL
             H::phys_to_virt(host_addr)
         });
         PageTable::create_from(root_paddr.into(), paging).query((addr as usize).into())
+    }
+
+    /// Read bytes from guest virtual memory.
+    ///
+    /// # Arguments
+    /// * `gva` - Guest virtual address to read from
+    /// * `size` - Number of bytes to read
+    ///
+    /// # Returns
+    /// * `Option<Vec<u8>>` - The read bytes if successful, None if the address is invalid
+    pub fn read_guest_virtual_memory(&self, vcpu_id: usize,  gva: usize, len: usize) -> Option<Vec<u8>> {
+        if let Some(vcpu) = self.vcpu(vcpu_id) {
+            let (mut addr, mut count) = (gva, len);
+            let page_table = vcpu.get_page_table_root();
+            if page_table != 0.into() {
+                let (paddr, _, size) = self
+                    .get_page(page_table, addr as u64).ok()?;
+                addr = paddr.as_usize();
+                count = count.min(size as usize);
+            }
+            // Return error when unwrap is failed.
+            self
+                .read_guest_memory(addr, count)
+        } else {
+            None
+        }
+    }
+
+    /// Read bytes from guest virtual memory.
+    ///
+    /// # Arguments
+    /// * `gva` - Guest virtual address to read from
+    /// * `size` - Number of bytes to read
+    ///
+    /// # Returns
+    /// * `Option<Vec<u8>>` - The read bytes if successful, None if the address is invalid
+    pub fn write_guest_virtual_memory(&self, vcpu_id: usize, gva: usize, data: &[u8]) -> Option<()> {
+        if let Some(vcpu) = self.vcpu(vcpu_id) {
+            let (mut addr, mut count) = (gva, data.len());
+            let page_table = vcpu.get_page_table_root();
+            if page_table != 0.into() {
+                let (paddr, _, size) = self
+                    .get_page(page_table, addr as u64).ok()?;
+                addr = paddr.as_usize();
+                count = count.min(size as usize);
+            }
+            self.write_guest_memory(addr, &data[..count])
+        } else {
+            None
+        }
     }
 }
